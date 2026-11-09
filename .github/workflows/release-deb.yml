@@ -1,6 +1,7 @@
 name: Debian package build
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -23,6 +24,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
+        dpkg-dev \
         libmpv-dev pkg-config qt6-base-dev qt6-declarative-dev \
         qt6-websockets-dev qt6-svg-dev libxkbcommon-dev \
         qml6-module-qt-labs-folderlistmodel qml6-module-qt-labs-platform \
@@ -42,6 +44,28 @@ jobs:
     - name: Copy program to deb-package
       run: cp src/build/AniLiberty specs/deb/usr/bin/aniliberty
 
+    - name: Compute runtime dependencies
+      run: |
+        mkdir -p /tmp/shlibdeps-analysis/debian
+        cat > /tmp/shlibdeps-analysis/debian/control <<'EOF'
+        Source: aniliberty
+        Section: video
+        Priority: optional
+        Maintainer: https://github.com/anilibria
+
+        Package: aniliberty
+        Architecture: amd64
+        Depends: ${shlibs:Depends}
+        Description: control stub for dependency analysis
+        EOF
+        SHLIBS="$(cd /tmp/shlibdeps-analysis && dpkg-shlibdeps -O "$GITHUB_WORKSPACE/specs/deb/usr/bin/aniliberty" | sed -n 's/^shlibs:Depends=//p')"
+        if [ -z "$SHLIBS" ]; then
+          echo "ERROR: dpkg-shlibdeps returned no shlibs:Depends" >&2
+          exit 1
+        fi
+        echo "Computed runtime deps: $SHLIBS"
+        sed -i "s|\${shlibs:Depends}|$SHLIBS|" specs/deb/DEBIAN/control
+
     - name: Update version in Debian control
       run: |
         if [ ! -f specs/deb/DEBIAN/control ]; then
@@ -50,8 +74,23 @@ jobs:
         fi
         sed -i "s/^Version:.*/Version: ${{ env.VERSION }}/" specs/deb/DEBIAN/control
 
+    - name: Update installed size in Debian control
+      run: |
+        INSTALLED_SIZE="$(du -sk specs/deb/usr | cut -f1)"
+        echo "Installed size: $INSTALLED_SIZE Kb"
+        sed -i "s/^Installed-Size:.*/Installed-Size: $INSTALLED_SIZE/" specs/deb/DEBIAN/control
+
     - name: Build deb-package
       run: dpkg-deb --build specs/deb/ aniliberty_${{ env.VERSION }}_amd64.deb
+
+    - name: Verify package dependencies
+      run: |
+        DEPS="$(dpkg-deb --field aniliberty_${{ env.VERSION }}_amd64.deb Depends)"
+        echo "Depends: $DEPS"
+        if echo "$DEPS" | grep -Eq -- '-dev|pkg-config|\$\{shlibs'; then
+          echo "ERROR: runtime package must not depend on build-time packages" >&2
+          exit 1
+        fi
 
     - name: Upload package artifact
       uses: actions/upload-artifact@v5
